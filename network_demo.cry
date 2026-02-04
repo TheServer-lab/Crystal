@@ -1,0 +1,91 @@
+# =========================================
+#  Crystal - Comments & Error Handling Demo
+# =========================================
+
+say "Welcome to the advanced features demo!"
+say ""
+
+# This is a comment - it won't be executed
+say "Comments work! Everything after # is ignored"
+say ""
+
+# ==================
+# Error Handling
+# ==================
+
+say "Testing error handling..."
+
+# Try to delete a file that might not exist
+try
+delete nonexistent_file.txt
+say "File deleted successfully!"
+catch
+say "Could not delete file (probably doesn't exist)"
+end try
+
+say ""
+
+# Create a file and then try to delete it
+make file temp_test.txt "temporary file"
+
+try
+delete temp_test.txt
+say "Successfully deleted temp_test.txt"
+catch
+say "Failed to delete temp_test.txt"
+end try
+
+say ""
+
+# ==================
+# Network Operations
+# ==================
+
+say "Testing network operations..."
+say ""
+
+# Ping a website
+say "Pinging google.com..."
+ping "google.com"
+say ""
+
+# Try to ping localhost (should always work)
+say "Pinging localhost..."
+ping "127.0.0.1"
+say ""
+
+# Download a file
+say "Downloading a test file..."
+try
+download "https://www.example.com/index.html" to example.html
+say "Download successful!"
+catch
+say "Download failed - this is expected if no network access"
+end try
+
+say ""
+
+# ==================
+# Combined Example
+# ==================
+
+say "Creating a backup script with error handling..."
+
+function backup_file
+try
+# Try to copy a file
+copy important.txt to important_backup.txt
+say "Backup created successfully!"
+catch
+say "Backup failed - file might not exist"
+# Create the file if it doesn't exist
+make file important.txt "This is important data"
+say "Created the file for next time"
+end try
+end function
+
+backup_file
+
+say ""
+say "Demo complete!"
+pause "Press Enter to exit..."

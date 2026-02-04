@@ -29,7 +29,14 @@ CRYSTAL_GRAMMAR = r"""
              | try_stmt
              | ping_stmt
              | download_stmt
-             | chain_stmt
+             | path_stmt
+             | cd_stmt
+             | pwd_stmt
+             | ls_stmt
+             | zip_stmt
+             | unzip_stmt
+             | wait_stmt
+             | error_stmt
 
     // Say command
     say_stmt: "say" STRING
@@ -41,7 +48,7 @@ CRYSTAL_GRAMMAR = r"""
     set_stmt: "set" ("local" | "global") VARIABLE "=" expression
 
     // If statement
-    if_stmt: "if" condition NEWLINE statement+ "end" "if"
+    if_stmt: "if" condition NEWLINE statement+ ("otherwise" NEWLINE statement+)? "end" "if"
 
     // Repeat loops
     repeat_stmt: "repeat" repeat_type NEWLINE statement+ "end" "repeat"
@@ -49,29 +56,29 @@ CRYSTAL_GRAMMAR = r"""
                | "infinite"                      -> repeat_infinite
                | "while" condition               -> repeat_while
                | "until" condition               -> repeat_until
-               | "for" "each" VARIABLE "in" path -> repeat_foreach
+               | "for" "each" VARIABLE "in" file_path -> repeat_foreach
 
     // Copy command
-    copy_stmt: "copy" path "to" path
+    copy_stmt: "copy" file_path "to" file_path force?
 
     // Move command
-    move_stmt: "move" path "to" path
+    move_stmt: "move" file_path "to" file_path force?
 
     // Delete command
-    delete_stmt: "delete" path
+    delete_stmt: "delete" file_path force?
 
     // List files
-    list_stmt: "list" ("files" | "folders" | "all")? ("in" path)?
+    list_stmt: "list" ("files" | "folders" | "all")? ("in" file_path)?
 
     // Create file or folder
-    create_stmt: "create" ("file" | "folder") path
+    create_stmt: "create" ("file" | "folder") file_path
 
     // Make file with content or folders (multiple)
-    make_stmt: "make" "file" path STRING           -> make_file
-             | "make" "folder" path+                -> make_folders
+    make_stmt: "make" "file" file_path STRING force?     -> make_file
+             | "make" "folder" file_path+                 -> make_folders
 
     // Include other scripts
-    include_stmt: "include" path
+    include_stmt: "include" file_path
 
     // Function definition
     function_def: "function" NAME NEWLINE statement+ "end" "function"
@@ -86,17 +93,38 @@ CRYSTAL_GRAMMAR = r"""
     try_stmt: "try" NEWLINE statement+ "catch" NEWLINE statement+ "end" "try"
 
     // Network operations
-    ping_stmt: "ping" (STRING | path)
-    download_stmt: "download" STRING "to" path
+    ping_stmt: "ping" STRING
+    download_stmt: "download" STRING "to" file_path force?
 
-    // Chained commands with semicolon
-    chain_stmt: statement ";" statement (";" statement)*
+    // Path management
+    path_stmt: "list" "path"                        -> list_path
+             | "add" "path" file_path                     -> add_path
+             | "remove" "path" file_path                  -> remove_path
+
+    // Navigation commands
+    cd_stmt: "cd" file_path
+    pwd_stmt: "pwd"
+    ls_stmt: "ls" file_path?
+
+    // Zip operations
+    zip_stmt: "zip" file_path+ "to" file_path
+    unzip_stmt: "unzip" file_path "to" file_path
+
+    // Wait/sleep command
+    wait_stmt: "wait" NUMBER time_unit?
+    time_unit: "second" | "seconds" | "minute" | "minutes" | "hour" | "hours"
+
+    // Error command
+    error_stmt: "error" STRING
+
+    // Force flag
+    force: "--force"
 
     // Conditions
     condition: file_exists
              | comparison
 
-    file_exists: "{" path "}" "exists"
+    file_exists: "{" file_path "}" "exists"
     
     comparison: expression COMP_OP expression
     COMP_OP: "greater" "than" | "less" "than" | "equals" | "is" | ">" | "<" | "="
@@ -118,9 +146,8 @@ CRYSTAL_GRAMMAR = r"""
     value: STRING
          | NUMBER
          | VARIABLE
-         | path
-
-    path: PATH | STRING
+    
+    file_path: PATH | STRING | VARIABLE
     
     // Tokens
     VARIABLE: "'" NAME "'"
@@ -145,6 +172,7 @@ class CrystalInterpreter(Transformer):
         self.local_vars = {}
         self.global_vars = self.load_global_vars()
         self.functions = {}  # Store user-defined functions
+        self.current_dir = os.getcwd()  # Track current directory
     
     def load_global_vars(self):
         """Load global variables from file (if exists)"""
@@ -248,10 +276,26 @@ class CrystalInterpreter(Transformer):
     def if_stmt(self, args):
         """Execute if statement"""
         condition = args[0]
-        statements = args[1:]
+        
+        # Find where 'otherwise' starts (if it exists)
+        otherwise_index = None
+        for i, arg in enumerate(args[1:], 1):
+            if hasattr(arg, 'type') and str(arg) == 'otherwise':
+                otherwise_index = i
+                break
+        
+        if otherwise_index:
+            if_statements = args[1:otherwise_index]
+            else_statements = args[otherwise_index+1:]
+        else:
+            if_statements = args[1:]
+            else_statements = []
         
         if self.evaluate_condition(condition):
-            for stmt in statements:
+            for stmt in if_statements:
+                self.execute_statement(stmt)
+        elif else_statements:
+            for stmt in else_statements:
                 self.execute_statement(stmt)
     
     def repeat_stmt(self, args):
@@ -311,9 +355,21 @@ class CrystalInterpreter(Transformer):
         """Execute copy command"""
         import shutil
         
+        # Check for --force flag
+        force = False
+        if args and str(args[-1]) == '--force':
+            force = True
+            args = args[:-1]
+        
         source, dest = args[0], args[1]
         src = self.resolve_value(source)
         dst = self.resolve_value(dest)
+        
+        # Handle relative paths
+        if not os.path.isabs(src):
+            src = os.path.join(self.current_dir, src)
+        if not os.path.isabs(dst):
+            dst = os.path.join(self.current_dir, dst)
         
         # Check if source exists
         if not os.path.exists(src):
@@ -321,7 +377,7 @@ class CrystalInterpreter(Transformer):
             return
         
         # Check if destination already exists
-        if os.path.exists(dst):
+        if os.path.exists(dst) and not force:
             confirm = input(f"'{dst}' already exists. Overwrite? (yes/no) ")
             if confirm.lower() not in ['yes', 'y']:
                 print("[CANCELLED] Copy operation cancelled")
@@ -333,7 +389,9 @@ class CrystalInterpreter(Transformer):
                 shutil.copy2(src, dst)
                 print(f"[SUCCESS] Copied file: {src} -> {dst}")
             elif os.path.isdir(src):
-                shutil.copytree(src, dst, dirs_exist_ok=True)
+                if os.path.exists(dst):
+                    shutil.rmtree(dst)
+                shutil.copytree(src, dst)
                 print(f"[SUCCESS] Copied directory: {src} -> {dst}")
         except Exception as e:
             print(f"[ERROR] Failed to copy: {e}")
@@ -342,9 +400,21 @@ class CrystalInterpreter(Transformer):
         """Execute move command"""
         import shutil
         
+        # Check for --force flag
+        force = False
+        if args and str(args[-1]) == '--force':
+            force = True
+            args = args[:-1]
+        
         source, dest = args[0], args[1]
         src = self.resolve_value(source)
         dst = self.resolve_value(dest)
+        
+        # Handle relative paths
+        if not os.path.isabs(src):
+            src = os.path.join(self.current_dir, src)
+        if not os.path.isabs(dst):
+            dst = os.path.join(self.current_dir, dst)
         
         # Check if source exists
         if not os.path.exists(src):
@@ -352,13 +422,18 @@ class CrystalInterpreter(Transformer):
             return
         
         # Check if destination already exists
-        if os.path.exists(dst):
+        if os.path.exists(dst) and not force:
             confirm = input(f"'{dst}' already exists. Overwrite? (yes/no) ")
             if confirm.lower() not in ['yes', 'y']:
                 print("[CANCELLED] Move operation cancelled")
                 return
         
         try:
+            if os.path.exists(dst):
+                if os.path.isdir(dst):
+                    shutil.rmtree(dst)
+                else:
+                    os.remove(dst)
             shutil.move(src, dst)
             print(f"[SUCCESS] Moved: {src} -> {dst}")
         except Exception as e:
@@ -368,8 +443,18 @@ class CrystalInterpreter(Transformer):
         """Execute delete command"""
         import shutil
         
+        # Check for --force flag
+        force = False
+        if args and str(args[-1]) == '--force':
+            force = True
+            args = args[:-1]
+        
         target = args[0] if isinstance(args, list) else args
         path = self.resolve_value(target)
+        
+        # Handle relative paths
+        if not os.path.isabs(path):
+            path = os.path.join(self.current_dir, path)
         
         # Check if path exists
         if not os.path.exists(path):
@@ -390,14 +475,15 @@ class CrystalInterpreter(Transformer):
             size = "unknown"
         
         # Confirm deletion
-        print(f"[WARNING] About to delete {item_type}: {path}")
-        if item_type == "directory":
-            print(f"          Contains: {size}")
-        confirm = input("Are you sure? (yes/no) ")
-        
-        if confirm.lower() not in ['yes', 'y']:
-            print("[CANCELLED] Delete operation cancelled")
-            return
+        if not force:
+            print(f"[WARNING] About to delete {item_type}: {path}")
+            if item_type == "directory":
+                print(f"          Contains: {size}")
+            confirm = input("Are you sure? (yes/no) ")
+            
+            if confirm.lower() not in ['yes', 'y']:
+                print("[CANCELLED] Delete operation cancelled")
+                return
         
         try:
             # Delete file or directory
@@ -499,11 +585,21 @@ class CrystalInterpreter(Transformer):
     
     def make_file(self, args):
         """Make a file with content"""
+        # Check for --force flag
+        force = False
+        if args and str(args[-1]) == '--force':
+            force = True
+            args = args[:-1]
+        
         target_path = self.resolve_value(args[0])
         content = self.resolve_value(args[1])
         
+        # Handle relative paths
+        if not os.path.isabs(target_path):
+            target_path = os.path.join(self.current_dir, target_path)
+        
         # Check if already exists
-        if os.path.exists(target_path):
+        if os.path.exists(target_path) and not force:
             confirm = input(f"'{target_path}' already exists. Overwrite? (yes/no) ")
             if confirm.lower() not in ['yes', 'y']:
                 print("[CANCELLED] Make file operation cancelled")
@@ -529,6 +625,10 @@ class CrystalInterpreter(Transformer):
         
         for path_arg in args:
             target_path = self.resolve_value(path_arg)
+            
+            # Handle relative paths
+            if not os.path.isabs(target_path):
+                target_path = os.path.join(self.current_dir, target_path)
             
             try:
                 # Create directory and all parent directories
@@ -658,8 +758,18 @@ class CrystalInterpreter(Transformer):
     
     def download_stmt(self, args):
         """Download a file from URL"""
+        # Check for --force flag
+        force = False
+        if args and str(args[-1]) == '--force':
+            force = True
+            args = args[:-1]
+        
         url = self.resolve_value(args[0])
         dest = self.resolve_value(args[1])
+        
+        # Handle relative paths
+        if not os.path.isabs(dest):
+            dest = os.path.join(self.current_dir, dest)
         
         try:
             import urllib.request
@@ -667,7 +777,7 @@ class CrystalInterpreter(Transformer):
             print(f"Downloading {url}...")
             
             # Check if destination exists
-            if os.path.exists(dest):
+            if os.path.exists(dest) and not force:
                 confirm = input(f"'{dest}' already exists. Overwrite? (yes/no) ")
                 if confirm.lower() not in ['yes', 'y']:
                     print("[CANCELLED] Download cancelled")
@@ -689,6 +799,257 @@ class CrystalInterpreter(Transformer):
         
         except Exception as e:
             print(f"[ERROR] Download failed: {e}")
+    
+    # Path management commands
+    def list_path(self, args):
+        """List PATH environment variable"""
+        path_var = os.environ.get('PATH', '')
+        paths = path_var.split(os.pathsep)
+        
+        print("PATH entries:")
+        print("=" * 60)
+        for i, p in enumerate(paths, 1):
+            print(f"{i}. {p}")
+        print(f"\nTotal: {len(paths)} entries")
+    
+    def add_path(self, args):
+        """Add directory to PATH"""
+        new_path = self.resolve_value(args[0])
+        
+        # Handle relative paths
+        if not os.path.isabs(new_path):
+            new_path = os.path.join(self.current_dir, new_path)
+        
+        if not os.path.exists(new_path):
+            print(f"[WARNING] Path does not exist: {new_path}")
+        
+        current_path = os.environ.get('PATH', '')
+        if new_path in current_path:
+            print(f"[INFO] Path already in PATH: {new_path}")
+            return
+        
+        os.environ['PATH'] = new_path + os.pathsep + current_path
+        print(f"[SUCCESS] Added to PATH: {new_path}")
+        print("[NOTE] This change is only for the current session")
+    
+    def remove_path(self, args):
+        """Remove directory from PATH"""
+        target_path = self.resolve_value(args[0])
+        
+        # Handle relative paths
+        if not os.path.isabs(target_path):
+            target_path = os.path.join(self.current_dir, target_path)
+        
+        current_path = os.environ.get('PATH', '')
+        paths = current_path.split(os.pathsep)
+        
+        if target_path not in paths:
+            print(f"[INFO] Path not in PATH: {target_path}")
+            return
+        
+        paths.remove(target_path)
+        os.environ['PATH'] = os.pathsep.join(paths)
+        print(f"[SUCCESS] Removed from PATH: {target_path}")
+        print("[NOTE] This change is only for the current session")
+    
+    # Navigation commands
+    def cd_stmt(self, args):
+        """Change current directory"""
+        target = self.resolve_value(args[0])
+        
+        # Handle relative paths
+        if not os.path.isabs(target):
+            target = os.path.join(self.current_dir, target)
+        
+        # Resolve path (handle .. and .)
+        target = os.path.abspath(target)
+        
+        if not os.path.exists(target):
+            print(f"[ERROR] Directory not found: {target}")
+            return
+        
+        if not os.path.isdir(target):
+            print(f"[ERROR] Not a directory: {target}")
+            return
+        
+        self.current_dir = target
+        os.chdir(target)
+        print(f"[CD] {target}")
+    
+    def pwd_stmt(self, args):
+        """Print working directory"""
+        print(self.current_dir)
+    
+    def ls_stmt(self, args):
+        """List files in directory (alias for list)"""
+        target_path = "."
+        
+        if args and len(args) > 0:
+            target_path = self.resolve_value(args[0])
+        
+        # Handle relative paths
+        if not os.path.isabs(target_path):
+            target_path = os.path.join(self.current_dir, target_path)
+        
+        if not os.path.exists(target_path):
+            print(f"[ERROR] Path not found: {target_path}")
+            return
+        
+        if not os.path.isdir(target_path):
+            print(f"[ERROR] Not a directory: {target_path}")
+            return
+        
+        try:
+            items = os.listdir(target_path)
+            
+            # Separate files and folders
+            files = []
+            folders = []
+            
+            for item in items:
+                full_path = os.path.join(target_path, item)
+                if os.path.isdir(full_path):
+                    folders.append(item)
+                else:
+                    files.append(item)
+            
+            print(f"\n{target_path}")
+            print("=" * 60)
+            
+            # Show folders first
+            if folders:
+                for folder in sorted(folders):
+                    print(f"  [DIR]  {folder}")
+            
+            if files:
+                for file in sorted(files):
+                    full_path = os.path.join(target_path, file)
+                    size = os.path.getsize(full_path)
+                    size_str = f"{size:,}" if size < 1024 else f"{size/1024:.1f}K"
+                    print(f"  {size_str:>8}  {file}")
+            
+            print(f"\n{len(folders)} folder(s), {len(files)} file(s)")
+        
+        except Exception as e:
+            print(f"[ERROR] Failed to list directory: {e}")
+    
+    # Zip operations
+    def zip_stmt(self, args):
+        """Zip files into an archive"""
+        import zipfile
+        
+        # Last arg is destination, rest are source files
+        dest_zip = self.resolve_value(args[-1])
+        source_files = args[:-1]
+        
+        # Handle relative paths
+        if not os.path.isabs(dest_zip):
+            dest_zip = os.path.join(self.current_dir, dest_zip)
+        
+        # Ensure .zip extension
+        if not dest_zip.endswith('.zip'):
+            dest_zip += '.zip'
+        
+        try:
+            with zipfile.ZipFile(dest_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for source_arg in source_files:
+                    source = self.resolve_value(source_arg)
+                    
+                    # Handle relative paths
+                    if not os.path.isabs(source):
+                        source = os.path.join(self.current_dir, source)
+                    
+                    if not os.path.exists(source):
+                        print(f"[WARNING] Skipping (not found): {source}")
+                        continue
+                    
+                    if os.path.isfile(source):
+                        zipf.write(source, os.path.basename(source))
+                        print(f"  Added: {source}")
+                    elif os.path.isdir(source):
+                        # Add directory recursively
+                        for root, dirs, files in os.walk(source):
+                            for file in files:
+                                file_path = os.path.join(root, file)
+                                arcname = os.path.relpath(file_path, os.path.dirname(source))
+                                zipf.write(file_path, arcname)
+                                print(f"  Added: {file_path}")
+            
+            size = os.path.getsize(dest_zip)
+            size_kb = size / 1024
+            print(f"[SUCCESS] Created zip: {dest_zip} ({size_kb:.2f} KB)")
+        
+        except Exception as e:
+            print(f"[ERROR] Failed to create zip: {e}")
+    
+    def unzip_stmt(self, args):
+        """Unzip an archive"""
+        import zipfile
+        
+        source_zip = self.resolve_value(args[0])
+        dest_dir = self.resolve_value(args[1])
+        
+        # Handle relative paths
+        if not os.path.isabs(source_zip):
+            source_zip = os.path.join(self.current_dir, source_zip)
+        if not os.path.isabs(dest_dir):
+            dest_dir = os.path.join(self.current_dir, dest_dir)
+        
+        if not os.path.exists(source_zip):
+            print(f"[ERROR] Zip file not found: {source_zip}")
+            return
+        
+        try:
+            # Create destination directory if it doesn't exist
+            os.makedirs(dest_dir, exist_ok=True)
+            
+            with zipfile.ZipFile(source_zip, 'r') as zipf:
+                zipf.extractall(dest_dir)
+                file_count = len(zipf.namelist())
+            
+            print(f"[SUCCESS] Extracted {file_count} file(s) to: {dest_dir}")
+        
+        except Exception as e:
+            print(f"[ERROR] Failed to unzip: {e}")
+    
+    def wait_stmt(self, args):
+        """Wait/sleep for a specified duration"""
+        import time
+        
+        # Get the number
+        amount = int(self.resolve_value(args[0]))
+        
+        # Get the time unit (default to seconds)
+        unit = "seconds"
+        if len(args) > 1:
+            unit = str(args[1]).lower()
+        
+        # Calculate sleep time in seconds
+        if unit in ['second', 'seconds']:
+            sleep_time = amount
+        elif unit in ['minute', 'minutes']:
+            sleep_time = amount * 60
+        elif unit in ['hour', 'hours']:
+            sleep_time = amount * 3600
+        else:
+            sleep_time = amount  # Default to seconds
+        
+        # Display what we're doing
+        if sleep_time < 60:
+            print(f"[WAIT] Waiting {amount} second(s)...")
+        elif sleep_time < 3600:
+            print(f"[WAIT] Waiting {amount} minute(s)...")
+        else:
+            print(f"[WAIT] Waiting {amount} hour(s)...")
+        
+        # Sleep
+        time.sleep(sleep_time)
+        print("[WAIT] Done!")
+    
+    def error_stmt(self, args):
+        """Raise a custom error"""
+        message = self.resolve_value(args[0])
+        raise Exception(message)
     
     def chain_stmt(self, args):
         """Execute chained commands"""
@@ -774,8 +1135,26 @@ class CrystalInterpreter(Transformer):
                 self.ping_stmt(stmt.children)
             elif stmt_type == 'download_stmt':
                 self.download_stmt(stmt.children)
-            elif stmt_type == 'chain_stmt':
-                self.chain_stmt(stmt.children)
+            elif stmt_type == 'list_path':
+                self.list_path(stmt.children)
+            elif stmt_type == 'add_path':
+                self.add_path(stmt.children)
+            elif stmt_type == 'remove_path':
+                self.remove_path(stmt.children)
+            elif stmt_type == 'cd_stmt':
+                self.cd_stmt(stmt.children)
+            elif stmt_type == 'pwd_stmt':
+                self.pwd_stmt(stmt.children)
+            elif stmt_type == 'ls_stmt':
+                self.ls_stmt(stmt.children)
+            elif stmt_type == 'zip_stmt':
+                self.zip_stmt(stmt.children)
+            elif stmt_type == 'unzip_stmt':
+                self.unzip_stmt(stmt.children)
+            elif stmt_type == 'wait_stmt':
+                self.wait_stmt(stmt.children)
+            elif stmt_type == 'error_stmt':
+                self.error_stmt(stmt.children)
     
     # Values and resolution
     def resolve_value(self, val):
